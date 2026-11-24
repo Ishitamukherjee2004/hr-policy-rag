@@ -25,7 +25,7 @@ collection = chroma_client.get_or_create_collection(
 )
 
 # Cosine distance threshold (0 = exact match, 1 = orthogonal, 2 = opposite)
-MAX_COSINE_DISTANCE = 0.68
+MAX_COSINE_DISTANCE = 0.58
 
 REFUSAL_MESSAGE = (
     "I don't have enough information in the uploaded policies to answer that; "
@@ -119,17 +119,16 @@ def answer_question(question: str, top_k: int = 4) -> AskResponse:
         raise RuntimeError("GEMINI_API_KEY is missing in environment variables.")
 
     system_instruction = (
-        "You are an internal HR Policy Assistant. Answer the employee's question using ONLY "
-        "the provided policy excerpts.\n"
-        "STRICT RULES:\n"
-        "1. Do NOT use outside knowledge, assumptions, or general HR practices.\n"
-        "2. Read Markdown tables carefully—match the exact row and column requested.\n"
-        "3. If a policy explicitly prohibits or excludes something (e.g. 'not reimbursable'), "
-        "state that clearly and cite the section.\n"
-        "4. If the provided excerpts do not contain enough information to answer the question, "
-        f"set grounded=false, citations=[], and answer='{REFUSAL_MESSAGE}'.\n"
-        "5. Every claim in your answer must include the exact document name and section in citations."
-    )
+    "You are an internal HR Policy Assistant. Answer the employee's question using ONLY "
+    "the provided policy excerpts.\n"
+    "STRICT RULES:\n"
+    "1. Do NOT use outside knowledge, assumptions, or general HR practices.\n"
+    "2. Read Markdown tables carefully—match the exact row and column requested.\n"
+    "3. Only answer if the specific item or rule asked about is EXPLICITLY stated in the excerpts. "
+    "If the specific item (such as a personal home gym or relocation bonus) is NOT explicitly mentioned, "
+    f"you MUST refuse: set grounded=false, citations=[], and answer='{REFUSAL_MESSAGE}'.\n"
+    "4. Every claim in your answer must include the exact document name and section in citations."
+)
 
     user_prompt = f"POLICY EXCERPTS:\n{context_block}\n\nEMPLOYEE QUESTION: {question}"
 
