@@ -2,7 +2,6 @@ import os
 import time
 from typing import List, Dict
 import chromadb
-from sentence_transformers import SentenceTransformer
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -11,9 +10,12 @@ from app.schemas import AskResponse, Citation
 
 load_dotenv()
 
-# Initialize local embedding model (runs offline on CPU, zero API cost)
-EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
-embedder = SentenceTransformer(EMBED_MODEL_NAME)
+# Initialize Gemini client (used for both embeddings and grounded generation)
+api_key = os.getenv("GEMINI_API_KEY")
+gemini_client = genai.Client(api_key=api_key) if api_key else None
+
+EMBED_MODEL_NAME = "gemini-embedding-001"
+LLM_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
 
 # Initialize persistent ChromaDB vector store
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
@@ -22,19 +24,24 @@ collection = chroma_client.get_or_create_collection(
     metadata={"hnsw:space": "cosine"},
 )
 
-# Initialize Gemini client
-api_key = os.getenv("GEMINI_API_KEY")
-gemini_client = genai.Client(api_key=api_key) if api_key else None
-LLM_MODELS = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
-
 # Cosine distance threshold (0 = exact match, 1 = orthogonal, 2 = opposite)
-# Queries above this threshold have no relevant policy match
 MAX_COSINE_DISTANCE = 0.68
 
 REFUSAL_MESSAGE = (
     "I don't have enough information in the uploaded policies to answer that; "
     "please contact HR."
 )
+
+
+def get_embeddings(texts: List[str]) -> List[List[float]]:
+    """Generates normalized vector embeddings via Gemini Embedding API (lightweight, <120MB RAM)."""
+    if not gemini_client:
+        raise RuntimeError("GEMINI_API_KEY is missing in environment variables.")
+    res = gemini_client.models.embed_content(
+        model=EMBED_MODEL_NAME,
+        contents=texts,
+    )
+    return [e.values for e in res.embeddings]
 
 
 def index_chunks(chunks: List[Dict[str, str]]) -> int:
@@ -50,7 +57,7 @@ def index_chunks(chunks: List[Dict[str, str]]) -> int:
         collection.delete(ids=existing["ids"])
 
     texts = [c["text"] for c in chunks]
-    embeddings = embedder.encode(texts, normalize_embeddings=True).tolist()
+    embeddings = get_embeddings(texts)
     ids = [f"{doc_name}::chunk_{i}" for i in range(len(chunks))]
     metadatas = [{"document": c["document"], "section": c["section"]} for c in chunks]
 
@@ -82,7 +89,7 @@ def answer_question(question: str, top_k: int = 4) -> AskResponse:
         )
 
     # 1. Embed query and search vector store
-    query_embedding = embedder.encode([question], normalize_embeddings=True).tolist()
+    query_embedding = get_embeddings([question])
     results = collection.query(
         query_embeddings=query_embedding,
         n_results=min(top_k, collection.count()),
@@ -109,7 +116,7 @@ def answer_question(question: str, top_k: int = 4) -> AskResponse:
 
     # 3. Gate 2: Call Gemini with strict grounding instructions & Pydantic JSON schema
     if not gemini_client:
-        raise RuntimeError("GEMINI_API_KEY is missing in .env file.")
+        raise RuntimeError("GEMINI_API_KEY is missing in environment variables.")
 
     system_instruction = (
         "You are an internal HR Policy Assistant. Answer the employee's question using ONLY "
@@ -146,7 +153,6 @@ def answer_question(question: str, top_k: int = 4) -> AskResponse:
             except Exception as exc:
                 last_error = exc
                 err_str = str(exc)
-                # Retry on temporary 503/429 overload, or fall back to next model
                 if "503" in err_str or "429" in err_str or "404" in err_str:
                     time.sleep(1.5)
                     continue
